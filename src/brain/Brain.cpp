@@ -32,14 +32,14 @@ int8_t tanh8(int16_t x) {
 void forward(const int8_t *weights, const int8_t *in, int8_t *out) {
     int16_t h[HID];
     for (int j = 0; j < HID; ++j) {
-        int16_t acc = 0;
+        int32_t acc = 0; // 8 个 int8 乘积的和可超过 int16 范围
         for (int i = 0; i < IN; ++i) {
             acc += (int16_t)weights[j * IN + i] * (int16_t)in[i];
         }
         h[j] = tanh8((int16_t)(acc >> 4));  // 缩放：8 输入 * 满幅 → >>4
     }
     for (int k = 0; k < OUT; ++k) {
-        int16_t acc = 0;
+        int32_t acc = 0;
         for (int j = 0; j < HID; ++j) {
             acc += (int16_t)weights[BRAIN_W_COUNT - HID * OUT + j * OUT + k] * (int16_t)h[j];
         }

@@ -8,17 +8,17 @@
 // 二进制布局（小端，紧凑无对齐）：
 //   offset size  字段
 //   ------ ----  ---------------------------------------------
-//      0    1     version
+//      0    1     version             (当前 2)
 //      1    2     generation            (uint16)
 //      3    2     fitness               (uint16, 0..10000 表示 0..1.0000)
-//      5    1     solved                (8-bit 位图，见 docs/protocol.md 中的限制)
-//      6    4     parent_sig            (父本签名, uint32)
-//     10    4     self_sig              (自身签名, uint32)
-//     14    40    weights[int8]         (N_IN*N_H + N_H*N_OUT)
-//     54    8     note                  (拉马克遗书, int8[8])
-//     62    2     crc16                 (对 [0..61] 的校验)
+//      5    2     solved                (16-bit 位图，覆盖 N_STEPS=10)
+//      7    4     parent_sig            (父本签名, uint32)
+//     11    4     self_sig              (自身签名, uint32)
+//     15   40     weights[int8]         (N_IN*N_H + N_H*N_OUT)
+//     55    8     note                  (拉马克遗书, int8[8])
+//     63    2     crc16                 (对 [0..62] 的校验)
 //   ------
-//   total = 64 字节  —— 一次 UDP 分片即可完整传输
+//   total = 65 字节  —— 一次 UDP 分片即可完整传输
 #pragma once
 
 #include <cstdint>
@@ -28,17 +28,17 @@
 
 namespace genome {
 
-constexpr size_t SIZE = 64;               // 完整基因组字节数
-constexpr size_t PAYLOAD_END = 62;        // CRC 之前有效载荷结束
-constexpr size_t WEIGHT_OFF = 14;         // 权重区起点
-constexpr size_t NOTE_OFF   = 54;         // 笔记区起点
-constexpr size_t CRC_OFF    = 62;         // CRC 位置
+constexpr size_t SIZE = 65;               // 完整基因组字节数
+constexpr size_t PAYLOAD_END = 63;        // CRC 之前有效载荷结束
+constexpr size_t WEIGHT_OFF = 15;         // 权重区起点
+constexpr size_t NOTE_OFF   = 55;         // 笔记区起点
+constexpr size_t CRC_OFF    = 63;         // CRC 位置
 
 struct Genome {
     uint8_t  version     = VERSION;
     uint16_t generation  = 0;
     uint16_t fitness     = 0;             // 0..10000
-    uint8_t  solved      = 0;             // 当前仅能保存 8 位；N_STEPS = 10
+    uint16_t solved      = 0;             // 16-bit 步骤位图（N_STEPS = 10）
     uint32_t parent_sig  = 0;
     uint32_t self_sig    = 0;
     int8_t   weights[WEIGHT_COUNT] = {0};
@@ -50,7 +50,7 @@ struct Genome {
 
     // —— 校验 ——
     static uint16_t crc16(const uint8_t *buf, size_t len);
-    bool check() const;                              // 重新序列化后的 CRC 自洽
+    bool check() const;                              // 版本、位图、适应度和指纹一致
     static uint16_t crc16Of(const uint8_t *buf, size_t len);
 
     // —— 进化操作 ——
@@ -59,6 +59,7 @@ struct Genome {
     void forgetStep(uint8_t step);                    // 每代随机遗忘（笔记退化）
     uint8_t stepsSolved() const;                      // 已学会步数
     float   pipelineRate() const;                     // 一次复制连乘成功率
+    uint16_t computeFitness() const;                  // fitness = pipelineRate × 10000
 
     // —— 遗传 ——
     Genome child() const;                             // 复制出后代
@@ -66,6 +67,7 @@ struct Genome {
     void    reseedNote();                             // 失败槽位重置回 naive 经验
 
     // —— 身份签名 ——
+    void refresh();                                 // 修改后刷新适应度和自身指纹
     static uint32_t sign(const uint8_t *buf, size_t len);
 };
 

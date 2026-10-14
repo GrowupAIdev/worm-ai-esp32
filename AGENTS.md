@@ -5,6 +5,7 @@
 - 模块边界：`brain/` 管理基因组与推理，`net/` 管理 UDP，`repl/` 管理传输会话，`worm/` 驱动主循环。
 - Wi-Fi 凭据放在被忽略的 `include/worm_secrets.h`；提交示例文件时只使用占位值。
 - 保持基因组版本、字节布局和 UDP 协议的兼容性。涉及协议修改时同步更新 `docs/protocol.md`。
+- 修改基因组的经验、权重或代次后调用 `Genome::refresh()`，确保适应度与自身指纹同步。
 - 模拟参数与固件模型不同。调整学习、遗忘或成功率参数时说明原因，不把模拟结果写成硬件实测。
-- 验证入口：`python sim/worm_sim.py` 和 `python -m platformio run -e esp32-s3-devkitc-1`。
+- 验证入口：`python tests/run_native.py`、`python sim/worm_sim.py` 和 `python -m platformio run -e esp32-s3-devkitc-1`。本机测试需要 `g++`/`clang++`，可用 `CXX` 指定路径。
 - 硬件相关行为需要板卡验证；仅编译通过时，在说明中明确验证范围。

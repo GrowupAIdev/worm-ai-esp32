@@ -1,13 +1,13 @@
 // Replicator.h —— 复制器：驱动一次「传输基因组 + 拉马克笔记」的完整会话
 //
 // 会话状态机（对应文章 BUILD + SPREAD 两步）：
-//   广播 HANDSHAKE -> 等待 ACK -> 定向 OFFER -> 定向 NOTE -> BYE
+//   HANDSHAKE -> 等待 ACK -> 定向 OFFER -> 等待确认 ACK -> BYE
 //
 // 角色：
 //   SENDER —— 主动复制（把自己传给目标）
 //   RECEIVER —— 被动接收（把收到的基因组孵化成本机新一代）
 //
-// 本实现的有效载荷为 [solved:1][fitness:2][genome:64]，不分片。
+// 本实现的载荷为完整基因组字节 [genome:65]，不分片。
 
 #pragma once
 #include <Arduino.h>
@@ -37,14 +37,31 @@ public:
                       uint32_t mySig, uint32_t timeoutMs = 3000,
                       const net::Frame *first = nullptr);
 
+    // —— 延迟帧队列：发送会话期间收到的 OFFER/NOTE 不丢弃，暂存待会话结束后处理 ——
+    bool hasDeferred() const { return defN_ > 0; }
+    bool popDeferred(net::Frame *out);
+
 private:
+    static constexpr int DEFQ_MAX = 4;
+
     Step  state_ = Step::IDLE;
-    Step  expectedNext_ = Step::IDLE;
     // 接收方缓冲：拼装收到帧
-    uint8_t rxGenomeBuf_[genome::SIZE + 3] = {0}; // [solved:1][fitness:2][genome]
+    uint8_t rxGenomeBuf_[genome::SIZE] = {0}; // [genome:65]
     bool  rxGenomeGot_ = false;
     bool  rxNoteGot_   = false;
     genome::Genome rxNote_;
+    IPAddress offerer_;                 // OFFER 来源 IP（用于回确认 ACK）
+    uint32_t offererSig_ = 0;           // 本会话握手/载荷的发送方指纹
+    net::Frame defQ_[DEFQ_MAX];         // 会话期间缓存的旁路帧
+    uint8_t  defN_ = 0;
 
-    void reset();
+    void reset();                       // 只清会话状态，保留 defQ_（跨会话缓存）
+    void pushDeferred(const net::Frame &f);
+    // 接收方处理一帧（HANDSHAKE→ACK / OFFER→缓冲 / NOTE→笔记）
+    void processRxFrame(net::WormNet &net, const net::Frame &f, uint32_t mySig);
+    // 发送方等待期间的旁路帧分类：他人 HANDSHAKE→回 ACK；
+    // OFFER/NOTE→入延迟队列；匹配的 ACK→返回 true（ackFrom = 对端 IP）
+    bool classifyWhileWaiting(net::WormNet &net, const net::Frame &f,
+                              IPAddress filterIp, bool anyFilter,
+                              uint32_t mySig, IPAddress *ackFrom);
 };

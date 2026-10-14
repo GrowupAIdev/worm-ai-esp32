@@ -13,23 +13,17 @@ using namespace genome;
 
 namespace {
 constexpr uint32_t HELLO_PERIOD_MS   = 2000;  // 周期性广播「我是一只蠕虫」
-constexpr uint32_t COOLDOWN_MS       = 5000;  // 一次复制后的冷却，避免风暴
+constexpr uint32_t COOLDOWN_OK_MS    = 1500;  // 复制成功：短冷却，趁热继续传播
+constexpr uint32_t COOLDOWN_FAIL_MS  = 5000;  // 复制失败：长冷却，防风暴
+constexpr uint32_t COOLDOWN_SKIP_MS  = 1000;  // PERM 拒绝：无交互，稍作停顿即可
 constexpr uint32_t SCAN_BUDGET_MS    = 150;   // FIND 阶段最多等待这么久
 constexpr uint32_t RX_SESSION_MS     = 1500;  // 接收复制会话的预算
 constexpr uint32_t PEER_TTL_MS       = 6000;  // 邻居表条目有效期
 constexpr uint32_t RECONNECT_MS      = 10000; // 断线重连间隔
+const IPAddress BCAST_IP(255,255,255,255);    // 广播寻宿主目标
 } // namespace
 
 Worm::Worm() { /* 空：randomSeed 放在 begin()（setup 内）里调 */ }
-
-// —— 静态辅助：给基因组重新签名并刷新 CRC ——
-static void resign(Genome *g) {
-    uint8_t buf[genome::SIZE];
-    g->self_sig = 0;
-    g->serialize(buf, sizeof(buf));
-    g->self_sig = Genome::sign(buf, genome::PAYLOAD_END);
-    g->serialize(buf, sizeof(buf)); // 再刷一次 CRC
-}
 
 void Worm::begin() {
     randomSeed(analogRead(0));
@@ -39,7 +33,7 @@ void Worm::begin() {
     uint32_t seed0 = esp_random();
     genome_.mutate(seed0, 1.0f);
     genome_.reseedNote();
-    resign(&genome_);
+    genome_.refresh();
     gen_ = genome_.generation;
 
     Serial.println(F("[worm] 蠕虫醒来 (AI Worm begin)"));
@@ -63,10 +57,11 @@ void Worm::loop() {
 
     uint32_t now = millis();
 
-    // —— 优先处理正在进来的复制会话 / 心跳 ——
-    if (net_.hasPending()) {
+    // —— 优先处理正在进来的复制会话 / 心跳 / 会话期间缓存的延迟帧 ——
+    if (net_.hasPending() || repl_.hasDeferred()) {
         handleIncoming(RX_SESSION_MS);
-        return;
+        now = millis(); // 收包不阻止心跳和主动传播，接收等待可能消耗时间
+        if (!net_.isReady()) return;
     }
 
     // —— 周期性广播存在（HELLO 是 FIND 的一半：别人也能发现我）——
@@ -76,23 +71,27 @@ void Worm::loop() {
         net_.send(MsgType::HELLO, genome_.self_sig, nullptr, 0);
     }
 
-    // —— 冷却门：刚复制完就歇一会儿，防止局域网风暴 ——
-    if (now - lastAction_ < COOLDOWN_MS) return;
+    // —— 冷却门：按上次动作结果自适应（成功快、失败慢、拒绝稍歇）——
+    if (now - lastAction_ < cooldownMs_) return;
 
     // ============ 四步循环 ============
-    // 1) FIND：选择目标节点（结果记入 lastPeer_）
+    // 1) FIND：选择目标节点（已知邻居轮转；表空则广播寻宿主）
     if (!step1_scan(SCAN_BUDGET_MS)) {
         return; // 没找到目标，等下次
     }
 
-    // 2) PERM：TinyBrain 根据环境特征决定是否发送
-    bool ok = step2_perm();
+    // 2) PERM：TinyBrain 根据环境特征决定是否发送（带探索地板）
+    bool attempt = step2_perm();
 
-    // 3) BUILD + SPREAD：把基因组 + 笔记送过去
-    if (ok) ok = step3_build(lastPeer_);
-
-    // 4) 拉马克进化：成功=记住经验，失败=忘掉并变异
-    step4_spread(ok);
+    if (attempt) {
+        // 3) BUILD + SPREAD：把基因组送过去
+        bool ok = step3_build(lastPeer_);
+        // 4) 拉马克进化：只在真实交互后奖惩（拒绝传播不惩罚）
+        step4_spread(ok);
+        cooldownMs_ = ok ? COOLDOWN_OK_MS : COOLDOWN_FAIL_MS;
+    } else {
+        cooldownMs_ = COOLDOWN_SKIP_MS; // 无交互：不遗忘、不变异
+    }
     lastAction_ = millis();
 }
 
@@ -102,10 +101,13 @@ bool Worm::step1_scan(uint32_t budgetMs) {
     IPAddress peers[net::WormNet::PEER_TABLE];
     int n = net_.livePeers(now, PEER_TTL_MS, peers, net::WormNet::PEER_TABLE);
     peerCount_ = n;
-
     IPAddress myip = WiFi.localIP();
-    for (int i = 0; i < n; ++i) {
+
+    // 已知邻居：轮转选择，均摊传播目标（原实现总打第一个，其余邻居饿死）
+    for (int k = 0; k < n; ++k) {
+        int i = (peerCursor_ + k) % n;
         if (peers[i] != myip) {
+            peerCursor_ = (i + 1) % n;
             lastPeer_ = peers[i];
             char line[64];
             snprintf(line, sizeof(line), "[find] 发现宿主 %d.%d.%d.%d",
@@ -115,11 +117,11 @@ bool Worm::step1_scan(uint32_t budgetMs) {
         }
     }
 
-    // 邻居表空：随机猜一个同网段 IP（文章：蠕虫靠「猜」扩散）
-    uint8_t last = (uint8_t)random(1, 255);
-    lastPeer_ = IPAddress(myip[0], myip[1], myip[2], last);
-    Serial.println("[find] 邻居表空，随机猜目标");
-    return true; // 猜了就返回 true，让 step2 去验证
+    // 邻居表空：广播 HANDSHAKE 全网找宿主
+    // （任意存活节点回 ACK 即成为真实目标；替代原 1/254 随机猜 IP）
+    lastPeer_ = BCAST_IP;
+    Serial.println(F("[find] 邻居表空，广播寻找宿主"));
+    return true;
 }
 
 bool Worm::step2_perm() {
@@ -134,7 +136,10 @@ bool Worm::step2_perm() {
     input_[3] = (int8_t)(gen_ & 0x7F);                     // 代数
 
     int8_t v = brain::decide(genome_.weights, input_);
-    bool ok = v >= 0;
+    // 探索地板：未训练的脑接近抛硬币，保底 PERM_FLOOR_PCT% 概率放行，
+    // 维持感染压下限（脑仍可对明显糟糕的环境说“不”）
+    bool ok = (v >= 0) ||
+              ((uint8_t)(esp_random() % 100) < (unsigned)evo::PERM_FLOOR_PCT);
     char line[80];
     snprintf(line, sizeof(line), "[perm] brain 决策 %d (peers=%d solved=%d fit=%d) -> %s",
              (int)v, peerCount_, genome_.stepsSolved(), genome_.fitness,
@@ -145,8 +150,10 @@ bool Worm::step2_perm() {
 
 bool Worm::step3_build(IPAddress target) {
     Serial.println(F("[build] 开始传输基因组 (BUILD+SPREAD)"));
-    bool ok = repl_.runSender(net_, target, genome_, genome_.self_sig,
-                              net::RX_BUF_TIMEOUT_MS);
+    // 超时分级：已知邻居给足握手时间；广播寻宿用短超时快速失败
+    uint32_t t = (target == BCAST_IP) ? (uint32_t)net::RX_BCAST_ACK_MS
+                                      : (uint32_t)net::RX_BUF_TIMEOUT_MS;
+    bool ok = repl_.runSender(net_, target, genome_, genome_.self_sig, t);
     Serial.println(ok ? F("[build] 复制成功") : F("[build] 复制失败"));
     return ok;
 }
@@ -158,7 +165,7 @@ bool Worm::step4_spread(bool success) {
         for (int s = 0; s < genome::N_STEPS; ++s) {
             if (random(100) < 80) genome_.learnStep(s); // 大概率把各步都标记为已避坑
         }
-        genome_.generation = gen_ + 1;
+        if (genome_.generation < 0xFFFFu) ++genome_.generation;
         gen_ = genome_.generation;
         Serial.println(F("[evo] 拉马克·成功：经验写入，代数+1"));
     } else {
@@ -171,15 +178,16 @@ bool Worm::step4_spread(bool success) {
         snprintf(line, sizeof(line), "[evo] 拉马克·失败：忘掉 step%d 并变异", s);
         Serial.println(line);
     }
-    resign(&genome_); // 签名/CRC 刷新
+    genome_.refresh();
     return true;
 }
 
 bool Worm::handleIncoming(uint32_t budgetMs) {
     Frame f;
-    if (!net_.receive(&f, 10)) return false;
+    // 优先消费发送会话期间缓存的延迟帧（OFFER/NOTE），其次读 socket
+    if (!repl_.popDeferred(&f) && !net_.receive(&f, 10)) return false;
 
-    if (f.src_sig == genome_.self_sig) return true; // 自己的广播
+    if (f.peer_ip == WiFi.localIP()) return true; // 自己的广播
 
     switch (f.type) {
         case MsgType::HELLO:
@@ -188,17 +196,19 @@ bool Worm::handleIncoming(uint32_t budgetMs) {
             return true;
 
         case MsgType::HANDSHAKE:
-        case MsgType::OFFER: {
-            // 我是候选宿主：接收对方的基因组
+        case MsgType::OFFER:
+        case MsgType::NOTE: {
+            // 我是候选宿主：接收对方的基因组（NOTE 也可能携带来自延迟队列的会话）
             Genome next;
             bool ok = repl_.runReceiver(net_, &next, genome_.self_sig,
                                         budgetMs, &f);
             if (ok) {
-                // 进化抉择：只收养比我强的后代
-                if (next.fitness >= genome_.fitness ||
-                    next.stepsSolved() >= genome_.stepsSolved()) {
+                // 进化抉择：适应度不降、且步数不减才收养（fitness 现为真实 pipelineRate×10000）
+                if (next.fitness > genome_.fitness ||
+                    (next.fitness == genome_.fitness &&
+                     next.stepsSolved() >= genome_.stepsSolved())) {
                     genome_ = next;
-                    if (next.generation > gen_) gen_ = next.generation;
+                    gen_ = next.generation;
                     Serial.println(F("[evo] 收养更优基因组"));
                 } else {
                     Serial.println(F("[evo] 拒绝弱基因组"));

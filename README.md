@@ -2,11 +2,11 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-This project has two parts: ESP32-S3 firmware exchanges 64-byte genomes and learning notes between nodes, while an offline Python simulator demonstrates learning, forgetting, and population selection across four stages.
+This project has two parts: ESP32-S3 firmware exchanges 65-byte genomes (protocol v2) between nodes, while an offline Python simulator demonstrates learning, forgetting, and population selection across four stages.
 The firmware uses a small 8→4→2 `int8` feedforward network to decide whether to send. Each node must already be flashed with this firmware; the network messages carry genome data.
 
-**Status: experimental prototype.** The simulator runs independently. The firmware has known UDP receive and stage-bitmap issues, documented in [Protocol and implementation limitations (Chinese)](docs/protocol.md).
-The simulator reports model probabilities. Hardware transfer reliability still requires validation.
+**Status: experimental prototype.** The simulator runs independently. Protocol v2 fixes the UDP receive path, frame header alignment, and stage-bitmap width, and adds a receipt ACK. Sessions have bounded waits and validate genome fingerprints; details in [Protocol and implementation limitations (Chinese)](docs/protocol.md).
+The simulator reports model probabilities. Multi-board communication still requires hardware validation.
 
 ## Repository layout
 
@@ -27,6 +27,7 @@ The simulator reports model probabilities. Hardware transfer reliability still r
 │   └── worm/                       # Main loop and evolution logic
 ├── sim/worm_sim.py                 # Python standard-library simulator
 ├── docs/protocol.md                # Wire formats and current implementation limits
+├── tests/                          # Host C++ regression tests with Wi-Fi/UDP stubs
 ├── AGENTS.md                       # Project development rules
 └── skills/                         # Project-specific skills
 ```
@@ -102,15 +103,26 @@ After flashing, the firmware attempts to join the configured Wi-Fi network and u
 
 | Stage | Current firmware behavior |
 | --- | --- |
-| FIND | Select a node from the peer table; when empty, guess an address with the same first three IP octets as the local node |
-| PERM | TinyBrain produces a GO / SKIP decision from eight input features |
-| BUILD | Send a handshake, a genome `OFFER`, and learning notes in `NOTE` |
+| FIND | Rotate through live peers; when none are available, broadcast a handshake and select the first responder |
+| PERM | TinyBrain produces a GO / SKIP decision from eight input features; a rejected decision still has a 75% chance to send |
+| BUILD | Send a handshake, wait for an ACK, send a genome `OFFER`, wait for a receipt ACK, then send `BYE` |
 | SPREAD | Update the learning bitmap, generation, and weights, then begin another cycle |
 
 The firmware uses a ten-step multiplicative model: each unlearned step succeeds with probability `0.92`, and each learned step with probability `0.98`.
 The theoretical probabilities are approximately 43.4% with no steps learned and 81.7% with all ten learned.
-The current `solved` field has only eight bits, so it cannot retain the learning state of all ten steps.
+The v2 `solved` field has 16 bits and retains all ten steps. The eight note slots still share entries between steps 0/8 and 1/9.
 Its parameters and implementation differ from the Python simulator's four-stage model.
+
+## Run firmware regression tests (no hardware required)
+
+Install a host `g++` or `clang++` compiler, or set `CXX` to its executable path, then run:
+
+```sh
+python tests/run_native.py
+```
+
+These tests compile the actual firmware modules against Arduino/Wi-Fi/UDP stubs and cover malformed packets, timeout bounds, sender isolation, genome validation, full-range inference, and generation limits.
+On Windows with drive H, test builds use `H:\CodexCache\worm-ai-tests`; `WORM_TEST_BUILD_DIR` overrides the location.
 
 ## Local pre-commit checks
 
@@ -125,5 +137,5 @@ git commit -m "chore: prepare repository for GitHub"
 Ignore rules cover `.pio/`, build outputs, Python caches, browser run records, and local Wi-Fi configuration.
 Before committing, confirm that the staging area contains only source code, example configuration, and documentation.
 
-Validation entry points are the simulator and the firmware build.
-Multi-board UDP communication, receipt acknowledgements, and actual evolution behavior require hardware testing after the current implementation issues are fixed.
+Validation entry points are the host regression tests, the simulator, and the firmware build.
+Multi-board UDP communication and actual evolution behavior still require hardware testing. Empty handshake and receipt ACKs have the same format, so delayed or duplicated ACKs can be misclassified; receipt confirmation is best effort.

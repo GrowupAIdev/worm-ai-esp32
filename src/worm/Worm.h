@@ -43,6 +43,8 @@ private:
     int8_t  input_[brain::IN];
     uint32_t gen_ = 0;
     uint32_t lastAction_ = 0;
+    uint32_t cooldownMs_ = 5000;  // 上次动作后的冷却时长（按结果自适应）
     uint32_t peerCount_  = 0;
+    int      peerCursor_ = 0;     // 邻居轮转游标（均摊传播目标）
     IPAddress lastPeer_  = IPAddress(0,0,0,0);
 };

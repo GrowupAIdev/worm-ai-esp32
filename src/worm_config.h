@@ -28,7 +28,9 @@ namespace net {
 constexpr uint16_t PORT             = 9999;    // 蠕虫 UDP 端口
 constexpr uint32_t BROADCAST_ADDR   = 0xFFFFFFFF; // 255.255.255.255
 constexpr uint16_t MTU              = 512;     // 单帧最大负载
-constexpr int      RX_BUF_TIMEOUT_MS = 2000;   // 等待应答的最长时间
+constexpr int      RX_BUF_TIMEOUT_MS = 2000;   // 已知邻居：等待握手 ACK 的最长时间
+constexpr int      RX_BCAST_ACK_MS   = 800;    // 广播找宿主：等待首个 ACK
+constexpr int      RX_CONFIRM_MS     = 800;    // OFFER 后等待接收确认 ACK
 } // namespace net
 
 // 协议帧类型（魔数 + 类型 + 长度 + 负载 + CRC16）
@@ -44,16 +46,16 @@ enum class MsgType : uint8_t {
 // ============================ 基因组 ==========================
 // 基因组 = 一段可序列化、可变异、可继承的字节。
 // 布局（见 brain/Genome.h）：
-//   [version][generation][fitness][solved(8-bit)]
+//   [version][generation][fitness][solved(16-bit)]
 //   [parent_sig][self_sig][int8 权重 ...]
 namespace genome {
-constexpr uint8_t VERSION    = 1;
+constexpr uint8_t VERSION    = 2;   // v2: solved 扩为 16 位（N_STEPS=10），共 65 字节
 constexpr int  N_IN  = 8;      // TinyBrain 输入维度
 constexpr int  N_H   = 4;      // 隐层
 constexpr int  N_OUT = 2;      // 输出
 constexpr int  N_STEPS = 10;   // 一次复制的「boot 步骤」数（文章 10 步）
 constexpr int  WEIGHT_COUNT = N_IN * N_H + N_H * N_OUT; // 32 + 8 = 40
-constexpr int  NOTE_FIELDS  = N_STEPS;  // 模型步骤数；当前 solved 存储宽度为 8 位
+constexpr int  NOTE_FIELDS  = N_STEPS;  // 模型步骤数；solved 已扩为 16 位可完整保存
 } // namespace genome
 
 // ============================ 进化 / 拉马克 ====================
@@ -66,6 +68,8 @@ constexpr float STEP_MASTERED = 0.98f;
 constexpr float NOTE_DECAY    = 0.02f;
 // 遗传 / 变异
 constexpr float MUTATION_RATE = 0.05f;   // 每基因位被扰动的概率
+constexpr float ADOPT_MUTATION_RATE = 0.025f; // 接收方孵化时的变异率（减半，避免削弱强基因组）
+constexpr int   PERM_FLOOR_PCT = 75;     // PERM 决策探索地板：脑说“不”时仍有 75% 概率放行
 constexpr int   POP_LIMIT     = 256;     // 本地可容纳的基因池上限
 } // namespace evo
 

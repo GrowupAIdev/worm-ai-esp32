@@ -23,6 +23,9 @@ static uint32_t getU32(const uint8_t *p){return p[0]|((uint32_t)p[1]<<8)|((uint3
 static uint16_t getU16(const uint8_t *p){return p[0]|((uint16_t)p[1]<<8);}
 
 bool WormNet::connect() {
+    ok_ = false;
+    sock_.stop();
+    for (auto &p : peers_) p = PeerEntry{};
     log((uint8_t)LogLevel::INFO, "[net] connecting WiFi ...");
     WiFi.mode(WIFI_AP_STA);
     WiFi.begin(WIFI_SSID, WIFI_PASS);
@@ -47,7 +50,7 @@ bool WormNet::send(MsgType t, uint32_t src_sig, const uint8_t *payload, uint16_t
 }
 
 bool WormNet::sendTo(IPAddress ip, MsgType t, uint32_t src_sig, const uint8_t *payload, uint16_t plen) {
-    if (!ok_ || plen > MTU) return false;
+    if (!isReady() || plen > MTU || (plen && !payload)) return false;
     uint8_t buf[HDR_SIZE + MTU + 2];
     size_t off = 0;
     buf[off++] = MAGIC0; buf[off++] = MAGIC1;
@@ -59,55 +62,61 @@ bool WormNet::sendTo(IPAddress ip, MsgType t, uint32_t src_sig, const uint8_t *p
     buf[off++] = (uint8_t)(c & 0xFF); buf[off++] = (uint8_t)(c >> 8);
 
     if (sock_.beginPacket(ip, PORT) <= 0) return false;
-    int n = sock_.write(buf, off);
-    sock_.endPacket();
-    return n == (int)off;
+    size_t n = sock_.write(buf, off);
+    if (n != off) return false;
+    return sock_.endPacket() == 1;
 }
 
 bool WormNet::receive(Frame *f, uint32_t timeoutMs) {
-    if (!ok_ || !f) return false;
+    if (!isReady() || !f) return false;
     uint32_t t0 = millis();
     for (;;) {
-        if (sock_.available() > 0) {
-            uint8_t buf[HDR_SIZE + MTU + 2];
-            int n = sock_.read(buf, sizeof(buf));
-            if (n < (int)HDR_SIZE + 2) return false;               // 短帧丢弃
-            if (buf[0] != MAGIC0 || buf[1] != MAGIC1) return false; // 非蠕虫帧
-            uint16_t plen = getU16(buf + 6);
-            if ((size_t)(HDR_SIZE + plen + 2) > (size_t)n) return false;
-            uint16_t crc  = getU16(buf + HDR_SIZE + plen);
-            if (crc16(buf, HDR_SIZE + plen) != crc) return false;   // 校验失败
-            f->type    = (MsgType)buf[2];
-            f->src_sig = getU32(buf + 3);
-            f->plen    = plen;
-            f->payload = buf + HDR_SIZE;
-            f->peer_ip = sock_.remoteIP();
-            notePeer(f->peer_ip, millis());
-            return true;
+        // 所有帧都受同一个截止时间约束，坏帧/无关帧不能延长等待。
+        if (!isReady() || (timeoutMs && (millis() - t0) >= timeoutMs)) return false;
+        // ESP32 WiFiUDP：available() 在 parsePacket() 之前恒为 0，必须先拉包
+        if (sock_.available() == 0) {
+            if (sock_.parsePacket() <= 0) {
+                delay(1);
+                continue;
+            }
         }
-        if (timeoutMs) {
-            if ((millis() - t0) > timeoutMs) return false;
-        } else {
-            delay(1);  // 无限等待模式：让出 CPU
-        }
+        uint8_t buf[HDR_SIZE + MTU + 2];
+        const int packetSize = sock_.available();
+        if (packetSize > (int)sizeof(buf)) { sock_.flush(); continue; }
+        int n = sock_.read(buf, sizeof(buf));
+        sock_.flush(); // 一个 UDP 数据报只解码一次，丢弃未读尾部
+        if (n != packetSize) continue;
+        if (n < (int)HDR_SIZE + 2) continue;                 // 短帧丢弃，继续等
+        if (buf[0] != MAGIC0 || buf[1] != MAGIC1) continue;  // 非蠕虫帧，继续等
+        if (buf[2] < (uint8_t)MsgType::HELLO || buf[2] > (uint8_t)MsgType::BYE) continue;
+        uint16_t plen = getU16(buf + 7);                     // 发送端 plen 位于偏移 7
+        if (plen > PAYLOAD_MAX) continue;                    // 超出内嵌缓冲
+        if ((size_t)(HDR_SIZE + plen + 2) != (size_t)n) continue;
+        if (buf[2] != (uint8_t)MsgType::OFFER && buf[2] != (uint8_t)MsgType::NOTE && plen != 0) continue;
+        uint16_t crc  = getU16(buf + HDR_SIZE + plen);       // CRC 位于 9+plen
+        if (crc16(buf, HDR_SIZE + plen) != crc) continue;    // 校验失败，继续等
+        f->type    = (MsgType)buf[2];
+        f->src_sig = getU32(buf + 3);
+        f->plen    = plen;
+        memcpy(f->payload, buf + HDR_SIZE, plen);
+        f->peer_ip = sock_.remoteIP();
+        notePeer(f->peer_ip, millis());
+        return true;
     }
 }
 
 // ---------------- 基因组打包 / 解包 ----------------
-// 携带基因组帧的 payload 布局：[solved:1][fitness:2][genome:64]
+// 载荷即完整基因组字节 [genome:65]（旧版 [solved:1][fitness:2] 前缀与基因组内字段重复，已移除）
 size_t WormNet::packGenomePayload(uint8_t *buf, size_t len, const Genome &g) {
-    if (!buf || len < 3 + genome::SIZE) return 0;
-    buf[0] = g.solved;
-    putU16(buf + 1, g.fitness);
-    g.serialize(buf + 3, genome::SIZE);
-    return 3 + genome::SIZE;
+    if (!buf || len < genome::SIZE) return 0;
+    if (!g.serialize(buf, len)) return 0;
+    return genome::SIZE;
 }
 
 bool WormNet::extractGenome(const Frame &f, Genome *out) {
-    if (f.plen < 3 + genome::SIZE) return false;
+    if (!out || f.plen != genome::SIZE) return false;
     Genome tmp;
-    if (!tmp.deserialize(f.payload + 3, f.plen - 3)) return false;
-    if (!tmp.check()) return false;
+    if (!tmp.deserialize(f.payload, f.plen)) return false; // 内含 CRC + 版本校验
     *out = tmp;
     return true;
 }
@@ -118,15 +127,18 @@ void WormNet::notePeer(IPAddress ip, uint32_t now) {
     for (auto &p : peers_) {
         if (p.ip == ip) { p.last_seen = now; return; }
     }
-    // 找不到就替换最旧的槽位
+    // 优先空槽，否则按经过时间选最旧槽（兼容 millis 回绕）。
     int worst = 0;
-    for (int i = 1; i < PEER_TABLE; ++i)
-        if (peers_[i].last_seen < peers_[worst].last_seen) worst = i;
+    for (int i = 0; i < PEER_TABLE; ++i) {
+        if (!peers_[i].valid()) { worst = i; break; }
+        if ((now - peers_[i].last_seen) > (now - peers_[worst].last_seen)) worst = i;
+    }
     peers_[worst].ip = ip;
     peers_[worst].last_seen = now;
 }
 
 int WormNet::livePeers(uint32_t now, uint32_t ttlMs, IPAddress *out, int maxN) const {
+    if (!out || maxN <= 0) return 0;
     int n = 0;
     for (const auto &p : peers_) {
         if (p.valid() && (now - p.last_seen) <= ttlMs && n < maxN) {
