@@ -1,5 +1,6 @@
 # 项目规则
 
+- `README.md` 是英文默认首页，`README.zh-CN.md` 是中文版本；保留双向语言入口，使用步骤和项目状态需同步更新。
 - `src/` 是 ESP32-S3 / Arduino 固件；`sim/worm_sim.py` 是独立的标准库模拟器。
 - 模块边界：`brain/` 管理基因组与推理，`net/` 管理 UDP，`repl/` 管理传输会话，`worm/` 驱动主循环。
 - Wi-Fi 凭据放在被忽略的 `include/worm_secrets.h`；提交示例文件时只使用占位值。
