@@ -1,0 +1,2 @@
+# Firmware build tool; the Python simulator uses only the standard library.
+platformio==6.2.0

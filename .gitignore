@@ -1,0 +1,33 @@
+# PlatformIO
+.pio/
+.pioenv/
+.pioenvs/
+.piolibdeps/
+
+# Local configuration / secrets
+/include/worm_secrets.h
+.env
+.env.*
+!.env.example
+
+# build artifacts
+build/
+dist/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Local browser automation / logs
+.playwright-mcp/
+*.log
+.DS_Store
+Thumbs.db
