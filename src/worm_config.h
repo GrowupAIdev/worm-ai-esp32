@@ -28,9 +28,13 @@ namespace net {
 constexpr uint16_t PORT             = 9999;    // 蠕虫 UDP 端口
 constexpr uint32_t BROADCAST_ADDR   = 0xFFFFFFFF; // 255.255.255.255
 constexpr uint16_t MTU              = 512;     // 单帧最大负载
-constexpr int      RX_BUF_TIMEOUT_MS = 2000;   // 已知邻居：等待握手 ACK 的最长时间
-constexpr int      RX_BCAST_ACK_MS   = 800;    // 广播找宿主：等待首个 ACK
-constexpr int      RX_CONFIRM_MS     = 800;    // OFFER 后等待接收确认 ACK
+constexpr uint8_t  WIRE_VERSION     = 3;       // 传输版本；基因组仍为 v2
+constexpr uint32_t RETRY_BASE_MS    = 150;
+constexpr uint32_t RETRY_JITTER_MS  = 40;
+constexpr uint8_t  MAX_ATTEMPTS     = 3;       // 含首次发送，每阶段最多三次
+constexpr uint32_t TX_STAGE_MS     = 1200;
+constexpr uint32_t DEDUP_TTL_MS    = 10000;
+constexpr int      RX_BATCH         = 8;       // 每次 poll 最多处理八个数据报
 } // namespace net
 
 // 协议帧类型（魔数 + 类型 + 长度 + 负载 + CRC16）
@@ -38,9 +42,9 @@ enum class MsgType : uint8_t {
     HELLO     = 0x01,  // 周期性广播「我是一只蠕虫」
     HANDSHAKE = 0x02,  // 请求建立复制通道
     OFFER     = 0x03,  // 携带完整基因组
-    ACK       = 0x04,  // 确认握手
-    NOTE      = 0x05,  // 拉马克笔记 / 遗书（传给下一代）
-    BYE       = 0x06   // 优雅退出
+    ACK       = 0x04,  // 回显事务号，载荷区分 HANDSHAKE / OFFER 确认
+    NOTE      = 0x05,  // 保留编号；v3 笔记已包含在 OFFER 的基因组中
+    BYE       = 0x06   // 保留编号；v3 无需结束通知
 };
 
 // ============================ 基因组 ==========================

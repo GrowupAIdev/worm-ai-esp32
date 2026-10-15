@@ -2,10 +2,10 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-This project has two parts: ESP32-S3 firmware exchanges 65-byte genomes (protocol v2) between nodes, while an offline Python simulator demonstrates learning, forgetting, and population selection across four stages.
+This project has two parts: ESP32-S3 firmware exchanges 65-byte v2 genomes using transport v3, while an offline Python simulator demonstrates learning, forgetting, and population selection across four stages.
 The firmware uses a small 8→4→2 `int8` feedforward network to decide whether to send. Each node must already be flashed with this firmware; the network messages carry genome data.
 
-**Status: experimental prototype.** The simulator runs independently. Protocol v2 fixes the UDP receive path, frame header alignment, and stage-bitmap width, and adds a receipt ACK. Sessions have bounded waits and validate genome fingerprints; details in [Protocol and implementation limitations (Chinese)](docs/protocol.md).
+**Status: experimental prototype.** Transport v3 uses nonblocking sessions, distinct discovery/receipt ACKs, bounded retries, and duplicate suppression. Known peers receive genomes directly; concurrent sends keep receiving. All nodes must be reflashed together because transport v2 is incompatible. See [Protocol and implementation limitations (Chinese)](docs/protocol.md).
 The simulator reports model probabilities. Multi-board communication still requires hardware validation.
 
 ## Repository layout
@@ -28,6 +28,7 @@ The simulator reports model probabilities. Multi-board communication still requi
 ├── sim/worm_sim.py                 # Python standard-library simulator
 ├── docs/protocol.md                # Wire formats and current implementation limits
 ├── tests/                          # Host C++ regression tests with Wi-Fi/UDP stubs
+├── tools/supervise.py              # Change-aware validation for Codex supervision
 ├── AGENTS.md                       # Project development rules
 └── skills/                         # Project-specific skills
 ```
@@ -105,7 +106,7 @@ After flashing, the firmware attempts to join the configured Wi-Fi network and u
 | --- | --- |
 | FIND | Rotate through live peers; when none are available, broadcast a handshake and select the first responder |
 | PERM | TinyBrain produces a GO / SKIP decision from eight input features; a rejected decision still has a 75% chance to send |
-| BUILD | Send a handshake, wait for an ACK, send a genome `OFFER`, wait for a receipt ACK, then send `BYE` |
+| BUILD | Send `OFFER` directly to known peers, or discover a peer first; continue receiving while awaiting a matching session/stage ACK |
 | SPREAD | Update the learning bitmap, generation, and weights, then begin another cycle |
 
 The firmware uses a ten-step multiplicative model: each unlearned step succeeds with probability `0.92`, and each learned step with probability `0.98`.
@@ -121,8 +122,30 @@ Install a host `g++` or `clang++` compiler, or set `CXX` to its executable path,
 python tests/run_native.py
 ```
 
-These tests compile the actual firmware modules against Arduino/Wi-Fi/UDP stubs and cover malformed packets, timeout bounds, sender isolation, genome validation, full-range inference, and generation limits.
+These tests compile the actual firmware modules against Arduino/Wi-Fi/UDP stubs and cover malformed packets, stale ACKs, retry limits, duplicate suppression, concurrent receiving, queue pressure, full-range inference, and generation limits.
 On Windows with drive H, test builds use `H:\CodexCache\worm-ai-tests`; `WORM_TEST_BUILD_DIR` overrides the location.
+
+The fixed-seed, eight-node test runs 64 transfers per channel configuration:
+
+| Injected datagram loss | Receiver accepted | Sender confirmed | Datagrams sent |
+| --- | --- | --- | --- |
+| 0% | 64/64 | 64/64 | 128 |
+| 10% | 64/64 | 62/64 | 150 |
+| 30% | 64/64 | 57/64 | 209 |
+
+For known peers without loss, one transfer uses two datagrams instead of the old five (60% fewer), and 98 application bytes instead of 120. Retries resend the same transaction; duplicate receipt does not create another child within the cache window.
+These are deterministic host tests of the C++ transport, not radio measurements or a claim of globally optimal throughput. Lost final ACKs can still leave the sender uncertain after its retry budget.
+
+## Codex supervision
+
+```sh
+python tools/supervise.py
+```
+
+Set `CXX` or use `--cxx` for the host compiler. The checker validates a public source snapshot on drive H with native tests, supervisor tests, the simulator, and the ESP32-S3 build. It excludes local Wi-Fi credentials, preserves logs, prevents overlapping runs, and skips an unchanged source/tool fingerprint. Use `--force` after an external environment change.
+Evidence is stored in `H:\CodexCache\worm-ai-supervision\status.json`. A repeated unchanged failure is reported as `unchanged_failure`, rather than silently passing or repeatedly running the same failing job.
+The Codex schedule for this chat runs every six hours. It may make up to two evidence-based repair attempts for a new incident, then revalidate; it preserves existing work and leaves Git commits and pushes to the user. Hardware or compatibility decisions require user input.
+Keep the computer and desktop app running for local supervision. See [official scheduled-task documentation](https://learn.chatgpt.com/docs/automations).
 
 ## Local pre-commit checks
 
@@ -138,4 +161,4 @@ Ignore rules cover `.pio/`, build outputs, Python caches, browser run records, a
 Before committing, confirm that the staging area contains only source code, example configuration, and documentation.
 
 Validation entry points are the host regression tests, the simulator, and the firmware build.
-Multi-board UDP communication and actual evolution behavior still require hardware testing. Empty handshake and receipt ACKs have the same format, so delayed or duplicated ACKs can be misclassified; receipt confirmation is best effort.
+Multi-board UDP communication and actual evolution behavior still require hardware testing. Duplicate suppression covers the most recent 32 accepted transfers for up to ten seconds; it is not durable across reboot and does not provide network authentication.

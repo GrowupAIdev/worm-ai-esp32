@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -25,7 +26,21 @@ def main():
     env = os.environ.copy()
     env["PATH"] = str(Path(compiler).resolve().parent) + os.pathsep + env.get("PATH", "")
     env["TEMP"] = env["TMP"] = str(build)
-    subprocess.run(command, check=True, env=env, timeout=120)
+    options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {"start_new_session": True}
+    child = subprocess.Popen(command, env=env, **options)
+    try:
+        code = child.wait(timeout=120)
+    except subprocess.TimeoutExpired:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(child.pid), "/T", "/F"], check=True, timeout=15,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           creationflags=subprocess.CREATE_NO_WINDOW)
+        else:
+            os.killpg(child.pid, signal.SIGKILL)
+        child.wait(timeout=15)
+        raise
+    if code:
+        raise subprocess.CalledProcessError(code, command)
     subprocess.run([str(binary), *sys.argv[1:]], check=True, env=env, timeout=20)
 
 
